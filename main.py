@@ -21,7 +21,7 @@ class PaymentRequest(BaseModel):
 async def mock_charge_credit_card(amount: float):
     #pause for 1 sec to get approval from bank but handel other requests too
     # without await,entire program would freeze for 1 sec
-    #await asyncio.sleep(1)
+    await asyncio.sleep(1)
     #asyncio looks for all the paused tasks and timers
     return{
         "transactionId": f"txn_{random.randint(100000, 999999)}",
@@ -34,43 +34,30 @@ async def pay(payment: PaymentRequest, idempotency_key: str=Header(..., alias="I
     
     try:
         conn=get_db_connection();
-        with conn:
-            with conn.cursor() as cur:
-                try:
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    
                     #insert with processing status
                     cur.execute("Insert into idempotency_keys (key, user_id, status) Values (%s, %s, 'PROCESSING')", (idempotency_key, X_user_id))
-                except errors.UniqueViolation:
-                    conn.rollback()
+        except errors.UniqueViolation:
+            conn.rollback()
 
-                    #check status of existing key
-                    with conn.cursor() as check_cur:
-                        check_cur.execute("SELECT status, response_payload from idempotency_keys where user_id=%s and key=%s", (X_user_id, idempotency_key))
-                        record=check_cur.fetchone()
+            #check status of existing key
+            with conn.cursor() as check_cur:
+                check_cur.execute("SELECT status, response_payload from idempotency_keys where user_id=%s and key=%s", (X_user_id, idempotency_key))
+                record=check_cur.fetchone()
 
-                        if record['status']=='SUCCESS':
-                            print(f"[Idempotency Hit] Returning cached response for key: {idempotency_key}")
-                            return {
-                                "message": "Retrieved from cache (Duplicate request safely caught)",
-                                "data": record['response_payload']
-                            }
-                        elif record['status'] == 'PROCESSING':
-                            raise HTTPException(status_code=409, detail="Payment is already being processed. Please wait a moment.")
-                #if duplicate entry does not exist
-                print(f"[New Payment] Processing charge for user {X_user_id}, amount {payment.amount}...")
-                gateway_response=await mock_charge_credit_card(payment.amount)
-                cur.execute(
-                    "INSERT INTO payments (user_id, amount, status) VALUES (%s, %s, 'SUCCESS')",
-                    (X_user_id, payment.amount)
-                )
-
-                cur.execute(
-                    "UPDATE idempotency_keys SET status = 'SUCCESS', response_payload = %s WHERE user_id = %s AND key = %s",
-                    (json.dumps(gateway_response), X_user_id, idempotency_key)
-                )
-                return {
-                    "message": "Payment processed successfully",
-                    "data": gateway_response
-                }
+                if record['status']=='SUCCESS':
+                    print(f"[Idempotency Hit] Returning cached response for key: {idempotency_key}")
+                    return {
+                        "message": "Retrieved from cache (Duplicate request safely caught)",
+                        "data": record['response_payload']
+                    }
+                elif record['status'] == 'PROCESSING':
+                    raise HTTPException(status_code=409, detail="Payment is already being processed. Please wait a moment.")
+        finally:
+            conn.close()
     #al errors other that duplicate id error
     except HTTPException as he:
         raise he
@@ -78,5 +65,31 @@ async def pay(payment: PaymentRequest, idempotency_key: str=Header(..., alias="I
         print("Payment processing error:", err)
         #500:something went wrong in internal server but no defined reason
         raise HTTPException(status_code=500, detail="Internal server error")
-    finally:
-        conn.close()
+                
+                    #if duplicate entry does not exist
+        print(f"[New Payment] Processing charge for user {X_user_id}, amount {payment.amount}...")
+        gateway_response=await mock_charge_credit_card(payment.amount)
+        conn=get_db_connection();
+        try:
+            with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO payments (user_id, amount, status) VALUES (%s, %s, 'SUCCESS')",
+                            (X_user_id, payment.amount)
+                        )
+
+                        cur.execute(
+                            "UPDATE idempotency_keys SET status = 'SUCCESS', response_payload = %s WHERE user_id = %s AND key = %s",
+                            (json.dumps(gateway_response), X_user_id, idempotency_key)
+                        )
+            return {
+                "message": "Payment processed successfully",
+                "data": gateway_response
+            }
+        except Exception as err:
+            print("Database error during finalization:", err)
+            raise HTTPException(status_code=500, detail="Internal server error")
+        finally:
+            conn.close()
+        
+        

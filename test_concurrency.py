@@ -19,12 +19,12 @@ async def send_request(client, request_num, idempotency_key, user_id):
         return {"requestNumber": request_num, "status": "ERROR", "data": traceback.format_exc()}
 
 async def run_test():
-    idempotency_key = "python-test-key-999"
+    idempotency_key = "python-test-key-998"
     user_id = "user_python_123"
 
     print("🚀 Firing 3 identical payment requests simultaneously...")
     
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient() as client:
         tasks = [send_request(client, i + 1, idempotency_key, user_id) for i in range(3)]
         results = await asyncio.gather(*tasks)
 
